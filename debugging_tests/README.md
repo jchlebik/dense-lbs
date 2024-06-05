@@ -1,0 +1,1 @@
+These are not real tests, these are just scripts using various parts of the solution meant to be observed with a debugger.
