@@ -1,8 +1,8 @@
 from absl import logging
 from clu import periodic_actions
 import ml_collections
-from utils.train_state import TrainState
-from utils.tensorboard_logging import TensorboardSummaryWriter_Acoustics
+from flax.training.train_state import TrainState
+from logger.base_logger import BaseLogger
 from utils import checkpointer, create_output_folder_structure
 
 
@@ -40,8 +40,7 @@ def handle_checkpoint_restoration(passed_cfg, t_state: TrainState):
     config = ml_collections.FrozenConfigDict(config)
     return t_state, config, passed_epochs
 
-
-def initialize_logging_utilities(tensorboard_dir: str, checkpoint_dir: str):
+def initialize_logging_utilities(tensorboard_dir: str, checkpoint_dir: str, enable_checkpointing: bool = True, enable_profiling: bool = False):
     """
     Initializes logging utilities for tensorboard, profiling, and checkpointing.
 
@@ -52,8 +51,17 @@ def initialize_logging_utilities(tensorboard_dir: str, checkpoint_dir: str):
     Returns:
         tuple: A tuple containing the summary writer, tracer, and checkpointer objects.
     """
-    summary_writer = TensorboardSummaryWriter_Acoustics(tensorboard_dir)
-    logging.info(f"Tensorboard logging at {tensorboard_dir}")
-    tracer = periodic_actions.Profile(logdir=tensorboard_dir, num_profile_steps=5, first_profile=5)
-    checkpoint_manager = checkpointer.CheckpointManager(checkpoint_dir)
+    summary_writer = BaseLogger("tensorboard")(tensorboard_dir)
+    logging.info(f"Tensorboard file at {tensorboard_dir}")
+    
+    if enable_profiling:
+        tracer = periodic_actions.Profile(logdir=tensorboard_dir, num_profile_steps=5, first_profile=5)
+    else:
+        tracer = None
+
+    if enable_checkpointing:
+        checkpoint_manager = checkpointer.CheckpointManager(checkpoint_dir)
+    else:
+        checkpoint_manager = None
+
     return summary_writer, tracer, checkpoint_manager

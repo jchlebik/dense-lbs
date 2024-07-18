@@ -21,8 +21,9 @@ def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
 
 
 config = ml_collections.ConfigDict()
+config.dataset_file_path = "/mnt/proj1/open-28-36/chlebik/datasets/1_7/128_16_(1500, 2800)_(1000, 1850)_10681415.022205297_6000_complex64_d8d3c439b81bc99fc2f5c99dd5d0fdaf.npz"
+#config.dataset_file_path = "/mnt/proj1/open-28-36/chlebik/datasets/1_7/128_16_(1.0, 3.0)_(1.0, 2.0)_1.0_6000_complex64_a20a468e0c30498ef6a52fabd69eb716.npz"
 
-config.dataset_file_path = "/mnt/proj1/open-28-36/chlebik/datasets/1_7/128_16_(1.0, 3.0)_(1.0, 2.0)_1.0_6000_complex64_a20a468e0c30498ef6a52fabd69eb716.npz"
 config.samples_per_epoch = 1000
 config.train_ratio = 0.8
 config.validation_ratio = 0.1

@@ -20,7 +20,7 @@ def get_config():
     config.seed                     = 9846351564531          # seed for initial model parameters and rng
     config.num_devices              = jax.local_device_count()  # gpus available for training
     config.per_device_batch_size    = 16                        # how many samples we wish to process per device per batch, global batch size is then product of this number and the number of devices available
-    config.samples_per_epoch        = 2000                     # No need to adjust to exact batch size as the dataloader is set to drop remainders
+    config.samples_per_epoch        = 6000                     # No need to adjust to exact batch size as the dataloader is set to drop remainders
     config.num_epochs               = 100000
     config.lr                       = 1e-3
     config.loss_fun                 = "linf"                # "l1" # "linf"
@@ -38,8 +38,8 @@ def get_config():
     config.stages                   = 1
     
     # Dataset loading options
-    config.train_ratio              = 1.0
-    config.validation_ratio         = 0.0
+    config.train_ratio              = 0.8
+    config.validation_ratio         = 0.1
     
     # TF settings
     config.prefetch_num             = jax.local_device_count()       # number of batches to prefetch while training... we are not using TF to train, so im not sure of the effect this setting has

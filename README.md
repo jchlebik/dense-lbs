@@ -1,1 +1,1 @@
-# Enhancing Acoustic Predictor with Density
+# Dense Learned Born Series

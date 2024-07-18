@@ -1,6 +1,6 @@
 import os
 import pickle
-from functools import partial, partialmethod
+from functools import partial
 from hashlib import md5
 import sys
 from typing import Any
@@ -11,7 +11,7 @@ from jwave.acoustics.time_harmonic import helmholtz, helmholtz_solver
 from jwave.geometry import Domain, Medium
 
 import tqdm
-from absl import app, flags
+from absl import flags
 from ml_collections import config_flags
 
 import jax
@@ -44,7 +44,7 @@ class MNISTHelmholtz:
     pml_size: int = 32
     sound_speed_lims: tuple[float, float] = (1.0, 1.3)
     density_lims: tuple[float, float] = (1.0, 1.9)
-    labels_filter: tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+    labels_pass_filter: tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
     omega: float = 1.0
     amplitude: float = 10.0
     src_pos: tuple[int, int] = (32, 32)
@@ -65,7 +65,8 @@ class MNISTHelmholtz:
         pml_size: int = 32,
         sound_speed_lims: tuple[float, float] = (1.0, 1.3),
         density_lims: tuple[float, float] = (1.0, 1.9),
-        labels_filter: tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        labels_pass_filter: tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        dx: tuple[float, float] = (1e-4, 1e-4),
         omega: float = 1.0,
         amplitude: float = 10.0,
         src_pos: tuple[int, int] = (32, 32),
@@ -77,7 +78,8 @@ class MNISTHelmholtz:
         self.pml_size = pml_size
         self.sound_speed_lims = sound_speed_lims
         self.density_lims = density_lims
-        self.labels_filter = labels_filter
+        self.labels_pass_filter = labels_pass_filter
+        self.dx = dx
         self.omega = omega
         self.amplitude = amplitude
         self.src_pos = src_pos
@@ -163,7 +165,7 @@ class MNISTHelmholtz:
             "omega": self.omega,
             "num_samples": self.num_samples,
             "dtype": self.dtype,
-            "label_filter": self.labels_filter,
+            "labels_pass_filter": self.labels_pass_filter,
         }
         with open(self.filepath, "wb") as f:
             pickle.dump(dict_to_save, f)
@@ -198,7 +200,7 @@ class MNISTHelmholtz:
             self.density_lims = dict_to_load["density_lims"]
             self.omega = dict_to_load["omega"]
             self.dtype = dict_to_load["dtype"]
-            self.labels_filter = dict_to_load["label_filter"]
+            self.labels_pass_filter = dict_to_load["labels_pass_filter"]
         return self
 
     def collate(self, start_idx, end_idx):
@@ -283,7 +285,7 @@ class MNISTHelmholtz:
         return im
 
     def _download_mnist(self):
-        return MNISTDownloader("tensorflow").get(self.num_samples, self.labels_filter)
+        return MNISTDownloader("tensorflow").get(self.num_samples, self.labels_pass_filter)
 
     def _mnist_acoustic_transform(self, mnist_images):
         @jax.jit
@@ -300,7 +302,7 @@ class MNISTHelmholtz:
     def _get_simulation_preliminaries(self):
         # Defining simulation parameters
         N = tuple([self.image_size + 2 * self.pml_size] * 2)
-        dx = (1.0, 1.0)
+        dx = self.dx
         domain = Domain(N, dx)
         return SimParams(N, dx, domain)
 
@@ -397,7 +399,8 @@ class MNISTHelmholtz:
         r"""Generates the dataset"""
 
         ## Download MNIST dataset
-        mnist_images = self._download_mnist() # (num_samples, 28, 28)
+        dts = self._download_mnist()
+        mnist_images = dts["image"]
 
         ## Simulation preparations
         print("Preliminaries")
@@ -446,14 +449,29 @@ class MNISTHelmholtz:
                         
         else:
             (sound_speeds, densities) = self._mnist_acoustic_transform(mnist_images)
-            (
-                self.sos_fields,
-                self.density_fields,
-                self.full_fields,
-                self.sources,
-                self.sound_speeds,
-                self.densities,
-            ) = self._run_simulations(initial_sim_params, sound_speeds, densities)
+            progress_bar = tqdm.trange(self.num_samples, desc="Generating", unit="sample", disable=os.environ.get("DISABLE_TQDM", False))
+            for i, (sos, rho) in zip(progress_bar, zip(sound_speeds, densities)):
+                
+                src = self._get_source(initial_sim_params, position = self.src_pos, amp = self.amplitude)
+                sos_only_field, density_only_field, full_field = self._helmholtz_simulate(sos, rho, src, initial_sim_params.domain)
+                
+                self.sos_fields.append(self._crop_edges(sos_only_field.on_grid, self.pml_size))
+                self.density_fields.append(self._crop_edges(density_only_field.on_grid, self.pml_size))
+                self.full_fields.append(self._crop_edges(full_field.on_grid, self.pml_size))
+                self.sources.append(self._crop_edges(src.on_grid, self.pml_size).real)
+                self.sound_speeds.append(self._crop_edges(sos, self.pml_size))
+                self.densities.append(self._crop_edges(rho, self.pml_size))
+                
+                
+                
+            # (
+            #     self.sos_fields,
+            #     self.density_fields,
+            #     self.full_fields,
+            #     self.sources,
+            #     self.sound_speeds,
+            #     self.densities,
+            # ) = self._run_simulations(initial_sim_params, sound_speeds, densities)
 
         ## Get the pml
         self.pml = self._crop_edges(
@@ -517,8 +535,9 @@ if __name__ == '__main__':
         pml_size=config.pml_size,
         sound_speed_lims=config.sos_range,
         density_lims=config.rho_range,
-        labels_filter=config.labels_filter,
+        labels_pass_filter=config.labels_pass_filter,
         num_samples=config.num_samples,
+        dx=config.dx,
         omega=config.omega,
         amplitude=config.amp,
         src_pos=config.src_pos,
@@ -526,5 +545,6 @@ if __name__ == '__main__':
         dtype=config.target,
     )
     print("Generating")
-    dataset.generate(batched=True)
+    out_path = dataset.generate(batched=True)
+    print(f"Dataset saved at: {out_path}")
     print("Done")

@@ -16,7 +16,7 @@ def get_config():
     config.seed                     = 9846351564531          # seed for initial model parameters and rng
     config.num_devices              = jax.local_device_count()  # gpus available for training
     config.per_device_batch_size    = 16                        # how many samples we wish to process per device per batch, global batch size is then product of this number and the number of devices available
-    config.samples_per_epoch        = 2000                     # No need to adjust to exact batch size as the dataloader is set to drop remainders
+    config.samples_per_epoch        = 6000                      # No need to adjust to exact batch size as the dataloader is set to drop remainders
     config.num_epochs               = 10000
     config.lr                       = 1e-3                  # learning rate
     config.loss_fun                 = "linf"                  # "l1" # "linf" # "l2" # "msre"

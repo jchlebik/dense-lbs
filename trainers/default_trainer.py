@@ -1,6 +1,7 @@
 import os
 from functools import partial
-from typing import Iterable, Any
+from statistics import mean
+from typing import TYPE_CHECKING, Iterable, Any
 
 import jax
 import jax.numpy as jnp
@@ -10,33 +11,39 @@ import ml_collections
 import tqdm
 from absl import logging
 
+if TYPE_CHECKING:
+    from logger.base_logger import BaseLogger
+    from utils.checkpointer import CheckpointManager
+else:
+    BaseLogger = Any
+    CheckpointManager = Any
+    
+from input_pipeline import InputPipeline
 import utils
-import utils.key_mapper
+from utils.key_mapper import KeyMapper as km
 
 class DefaultTrainer:   
     config : ml_collections.ConfigDict
     steps_per_train_epoch : int
     steps_per_validation : int
     passed_epochs : int
-    summary_writer : Any
+    summary_writer : BaseLogger
     tracer : Any
-    checkpointer : Any
+    checkpointer : CheckpointManager
     property_index_map : dict
-    wanted_keys : list
-    keys_to_batch_map : dict
 
     def __init__(self, model: str):
         if model not in ['lbs', 'dlbs', 'corrector']:
             raise ValueError(f"Invalid model: {model}")
         
         if model == 'lbs':
-            from trainers.model_builders.lbs_builder import LbsBuilder
+            from models.builders.lbs_builder import LbsBuilder
             self.model_builder = LbsBuilder()
         elif model == 'dlbs':
-            from trainers.model_builders.dlbs_builder import DlbsBuilder
+            from models.builders.dlbs_builder import DlbsBuilder
             self.model_builder = DlbsBuilder()
         elif model == 'corrector':
-            from trainers.model_builders.corrector_builder import CorrectorBuilder
+            from models.builders.corrector_builder import CorrectorBuilder
             self.model_builder = CorrectorBuilder()
             
         self.best_validation_loss = float("inf")
@@ -48,6 +55,9 @@ class DefaultTrainer:
         self.tracer = None
         self.checkpointer = None
         self.property_index_map = {}
+
+    def set_config(self, config):
+        self.config = config
     
     def setup_iterators(self, model_keys):
         """
@@ -63,8 +73,14 @@ class DefaultTrainer:
                 - prop_index_map (dict): A dictionary mapping property names to their corresponding indices in the dataset.
 
         """
-        iterators, dataset_metadata = utils.InputPipeline('tensorflow').create_input_iter(self.config, model_keys)
+        iterators, dataset_metadata = InputPipeline('tensorflow').create_input_iter(self.config, model_keys)
         self.config.image_size = dataset_metadata["image_size"]
+        
+        if iterators["val"]["size"] == 0:
+            logging.warning("Validation dataset is empty. Using cross-validation with training dataset.")
+            iterators["val"]["size"] = int(0.2 * iterators["train"]["size"])
+            iterators["val"]["iter"] = iterators["train"]["iter"]
+        
         self.steps_per_train_epoch = iterators["train"]["size"] // (self.config.per_device_batch_size * self.config.num_devices)
         self.steps_per_validation = iterators["val"]["size"] // (self.config.per_device_batch_size * self.config.num_devices)
         return iterators, self.config, dataset_metadata["prop_index_map"]
@@ -87,21 +103,25 @@ class DefaultTrainer:
 
         iterators, self.config, self.property_index_map = self.setup_iterators(model.get_keys())
         
-        t_state = self.model_builder.setup_train_state(self.config, model, optimizer, self.property_index_map)
+        t_state = self.model_builder.setup_train_state(self.config, model, optimizer)
 
         t_state, self.config, self.passed_epochs = utils.handle_checkpoint_restoration(self.config, t_state)
         
-        self.summary_writer, self.tracer, self.checkpointer = utils.initialize_logging_utilities(self.config.tensorboard_dir, self.config.checkpoint_dir)
-        self.summary_writer.write_hparams(dict(self.config))
+        self.summary_writer, self.tracer, self.checkpointer = utils.initialize_logging_utilities(self.config.tensorboard_dir, 
+                                                                                                 self.config.checkpoint_dir, 
+                                                                                                 enable_profiling= False)
+        self.summary_writer.write_hparams(hparams = dict(self.config))
         t_state = jax_utils.replicate(t_state)  # Replicate the network across all devices for ddp
 
         logging.info("Starting the training process...")
         
+        best_validation_loss = 1e9
         ############# START OF TRAINING LOOP #############
         for epoch in tqdm.trange(self.passed_epochs, config.num_epochs, desc="Epoch", position=0, disable=os.environ.get("DISABLE_TQDM", False)):
             t_state = self.training_loop(t_state, iterators["train"]["iter"], epoch)
             if (epoch + 1) % config.validate_every_n_epochs == 0:
-                self.best_validation_loss = self.validation_loop(t_state, iterators["train"]["iter"], epoch)
+                #continue
+                best_validation_loss = self.validation_loop(t_state, iterators["val"]["iter"], epoch, best_validation_loss)
         ############## END OF TRAINING LOOP ##############
         
         self.summary_writer.flush()
@@ -112,7 +132,7 @@ class DefaultTrainer:
         jax.random.normal(jax.random.key(0), ()).block_until_ready()
 
         return jax_utils.unreplicate(t_state)
-    
+        
     @partial(jax.pmap, static_broadcasted_argnums=(0))
     def predict(self, t_state: TrainState, kwargs_dict):
         """
@@ -183,6 +203,18 @@ class DefaultTrainer:
         all_reduce_metrics = jax.lax.pmean(all_reduce_metrics, axis_name="data")
         return all_reduce_metrics['loss'], all_reduce_metrics['acc']
      
+    @partial(jax.pmap, static_broadcasted_argnums=(0), in_axes=(None, 0, 0), axis_name="data")
+    def test_batch(self, t_state: TrainState, kwargs_dict):
+        scaled_ground_truths_batch = self.config.training_scale_factor * kwargs_dict["ground_truths_batch"]
+        loss_val, pred_field_batch = self.loss_fn(t_state, t_state.params, **kwargs_dict)
+            
+        error_field = jnp.abs(pred_field_batch - scaled_ground_truths_batch)
+        max_val = jnp.max(jnp.abs(scaled_ground_truths_batch), axis=(1, 2, 3))
+        acc = 1.0 - jnp.mean(error_field / max_val)
+        acc = acc * 100.0
+        
+        return loss_val, acc
+    
     @partial(jax.jit, static_argnums=(0))
     def loss_fn(self, t_state: TrainState, params: core.FrozenDict[str, Any], **kwargs):
         """
@@ -202,11 +234,11 @@ class DefaultTrainer:
         pred_field_batch = t_state.apply_fn({"params": params}, **kwargs)
         
         diff = jnp.abs(pred_field_batch - scaled_ground_truths_batch)
-
+        
         losses = {
-            "l2": jnp.mean(diff ** 2),
-            "linf": jnp.mean(jnp.amax(diff, axis=(1, 2))),
-            "l1": jnp.mean(diff),
+            "l2": jnp.mean(diff ** 2) if self.config.loss_fun == "l2" else None,
+            "linf": jnp.mean(jnp.amax(diff, axis=(1, 2))) if self.config.loss_fun == "linf" else None,
+            "l1": jnp.mean(diff) if self.config.loss_fun == "l1" else None,
         }
     
         if self.config.loss_fun not in losses:
@@ -227,7 +259,7 @@ class DefaultTrainer:
             Any: The result of applying the gradients to the training state.
         """
         return t_state.apply_gradients(grads=parameter_gradients)
-        
+    
     def training_loop(self, t_state: TrainState, train_it: Iterable[Any], epoch: int):
         """
         Executes the training loop for a single epoch.
@@ -249,6 +281,8 @@ class DefaultTrainer:
             kwargs = self.model_builder.kwargs_builder(self.property_index_map, t_batch)
             kwargs["ground_truths_batch"] = t_batch[self.property_index_map["full_fields"]]
 
+
+            #loss = pmap_test(kwargs["sound_speeds_batch"], kwargs["densities_batch"])
             loss, grads = self.train_batch(t_state, kwargs)
             t_state = self.update_model(t_state, grads)
 
@@ -266,7 +300,7 @@ class DefaultTrainer:
             #summary_writer.write_histograms(epoch, {f"Grads_{epoch//20}" : jnp.concatenate([g.flatten() for g in jax.tree.leaves(grads)])})
         return t_state
     
-    def validation_loop(self, t_state: TrainState, val_it: Iterable[Any], epoch: int):
+    def validation_loop(self, t_state: TrainState, val_it: Iterable[Any], epoch: int, best_validation_loss: float):
         """
         Perform the validation loop for a given epoch.
 
@@ -280,9 +314,9 @@ class DefaultTrainer:
         """
         validation_losses_container = []
         validation_accuracy_container = []
-        best_validation_loss = self.best_validation_loss
+        #best_validation_loss = self.best_validation_loss
         
-        #v_batch_to_log = None
+        v_batch_to_log = None
 
         if self.steps_per_validation == 0:
             logging.warning("Validation dataset is empty.")
@@ -293,7 +327,7 @@ class DefaultTrainer:
         for step, v_batch in zip(progress_bar, val_it):
             # batch.shape == (4, n_devices, batch_size_per_device, img_size1, img_size2, 1)
             kwargs = self.model_builder.kwargs_builder(self.property_index_map, v_batch)
-            kwargs["ground_truths_batch"] = v_batch[self.property_index_map["full_fields"]]
+            kwargs["ground_truths_batch"] = v_batch[self.property_index_map[km.get_full_field_key()]]
 
             loss, acc = self.validate_batch(t_state, kwargs)
 
@@ -301,38 +335,42 @@ class DefaultTrainer:
             validation_losses_container.append(float(loss[0]))
             validation_accuracy_container.append(float(acc[0]))
             
-            if self.v_batch_to_log is None:
-                self.v_batch_to_log = v_batch
+            if v_batch_to_log is None:
+                v_batch_to_log = v_batch
 
         validation_loss = float(jnp.mean(jnp.array(validation_losses_container)))
         validation_accuracy = float(jnp.mean(jnp.array(validation_accuracy_container)))
         #logging.debug("validation_loss: %.4f, best_validation_loss: %.4f" % (validation_loss, best_validation_loss))
 
         if self.summary_writer is not None:
-            kwargs = self.model_builder.kwargs_builder(self.property_index_map, self.v_batch_to_log)
+            kwargs = self.model_builder.kwargs_builder(self.property_index_map, v_batch_to_log)
 
             #it is faster to run on multigpu and just take one result than unreplicating the entire train state
-            predicted_field_batch = self.predict(t_state, **kwargs)
+            predicted_field_batch = self.predict(t_state, kwargs)
 
-            device, sample = 0, 0
-            self.summary_writer.log_acoustic_fields_tensorboard(
-                step_n = epoch, 
-                sos = self.v_batch_to_log[self.property_index_map["sound_speeds"]][device][sample], 
-                density = self.v_batch_to_log[self.property_index_map["densities"]][device][sample], 
-                sos_field = self.v_batch_to_log[self.property_index_map["sos_fields"]][device][sample],
-                true_field = jnp.round(self.v_batch_to_log[self.property_index_map["full_fields"]][device][sample], 4), 
-                pred_field = jnp.round(predicted_field_batch[device][sample] / self.config.training_scale_factor, 4)
+            fields_to_log = self.summary_writer.prepare_acoustic_properties_for_logging(
+                v_batch_to_log, 
+                predicted_field_batch / self.config.training_scale_factor,
+                self.property_index_map,
+                self.model_builder.get_model_keys(),
+                skip_keys_substr=["pml", "source"]
             )
+            
+            self.summary_writer.log_acoustic_fields(
+                step_n = epoch, 
+                fields = fields_to_log
+            )
+
             self.summary_writer.write_scalars(epoch, {"Loss/validation": validation_loss})
             self.summary_writer.write_scalars(epoch, {"Accuracy": validation_accuracy})
 
         ####### CHECKPOINT #######
         if validation_loss < best_validation_loss:
             best_validation_loss = validation_loss
+            if self.config.enable_checkpointing and epoch >= self.config.checkpointing_warmup:
+                self.checkpointer.save_checkpoint(jax_utils.unreplicate(t_state), dict(self.config), epoch + 1, validation_loss)
 
-        if self.config.enable_checkpointing and epoch >= self.config.checkpointing_warmup:
-            #TODO: it seems that we cannot save number 0 in epoch... ?????????
-            self.checkpointer.save_checkpoint(jax_utils.unreplicate(t_state), self.config, epoch + 1, validation_loss)
-            #logging.debug("Checkpoint saved.")
 
         return best_validation_loss
+    
+    

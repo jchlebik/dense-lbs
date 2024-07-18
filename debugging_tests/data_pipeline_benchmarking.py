@@ -5,7 +5,7 @@ import tqdm
 import sys
 sys.path.append('/home/xchleb07/dev/dlbs')
 
-import utils
+from input_pipeline.input_pipeline import InputPipeline
 
 num_tests = 50
 
@@ -31,7 +31,7 @@ def benchmark_torch():
     config.validation_ratio         = 0.1
     config = ml_collections.FrozenConfigDict(config)
     
-    iterators, dataset_metadata = utils.InputPipeline('torch').create_input_iter(config)
+    iterators, dataset_metadata = InputPipeline('torch').create_input_iter(config)
     
     train_it = iterators["train"]["iter"]
     
@@ -66,7 +66,7 @@ def benchmark_tensorflow():
     config.prefetch_num             = jax.local_device_count()
     config = ml_collections.FrozenConfigDict(config)
     
-    iterators, dataset_metadata = utils.InputPipeline('tensorflow').create_input_iter(config)
+    iterators, dataset_metadata = InputPipeline('tensorflow').create_input_iter(config)
     
     train_it = iterators["train"]["iter"]
     

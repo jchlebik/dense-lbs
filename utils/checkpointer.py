@@ -15,7 +15,7 @@ class CheckpointManager:
                 "epoch": orbax.checkpoint.StandardCheckpointHandler(),
                 "loss": orbax.checkpoint.StandardCheckpointHandler()
             },  
-            options=orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=True, best_fn=lambda metrics: metrics['loss'], best_mode='min')
+            options=orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=True)
         )
     
     def get_checkpoint_manager(self) -> orbax.checkpoint.CheckpointManager:
@@ -27,7 +27,7 @@ class CheckpointManager:
         """
         return self.checkpoint_manager
 
-    def save_checkpoint(self, t_state: TrainState, config: ml_collections.FrozenConfigDict, step: int, loss: float) -> str:
+    def save_checkpoint(self, t_state: TrainState, config: dict, step: int, loss: float):
         """
         Saves a checkpoint of the training state.
 
@@ -42,7 +42,7 @@ class CheckpointManager:
         return self.checkpoint_manager.save(
             step, 
             args=orbax.checkpoint.args.Composite(
-                config=orbax.checkpoint.args.JsonSave(dict(config)),
+                config=orbax.checkpoint.args.JsonSave(config),
                 model=orbax.checkpoint.args.PyTreeSave(t_state),
                 epoch=orbax.checkpoint.args.StandardSave(step),
                 loss = orbax.checkpoint.args.StandardSave(loss)
@@ -50,7 +50,7 @@ class CheckpointManager:
             metrics={'loss': loss}
         )
     
-    def restore_from_checkpoint(self, t_state: TrainState):
+    def restore_from_checkpoint(self, t_state: TrainState) -> tuple[TrainState, ml_collections.ConfigDict, int]:
         """
         Restores the training state from the latest checkpoint.
 
@@ -72,3 +72,7 @@ class CheckpointManager:
                                 opt_state=restored_optimizer)  
     
         return t_state, ml_collections.ConfigDict(restored_dict['config']), restored_dict['epoch']
+
+    def __del__(self):
+        self.checkpoint_manager.close()
+        self.checkpoint_manager = None
