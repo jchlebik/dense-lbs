@@ -115,13 +115,13 @@ class DefaultTrainer:
 
         logging.info("Starting the training process...")
         
-        best_validation_loss = 1e9
+        best_validation_losses = [1e9] * 3
         ############# START OF TRAINING LOOP #############
         for epoch in tqdm.trange(self.passed_epochs, config.num_epochs, desc="Epoch", position=0, disable=os.environ.get("DISABLE_TQDM", False)):
             t_state = self.training_loop(t_state, iterators["train"]["iter"], epoch)
             if (epoch + 1) % config.validate_every_n_epochs == 0:
                 #continue
-                best_validation_loss = self.validation_loop(t_state, iterators["val"]["iter"], epoch, best_validation_loss)
+                best_validation_losses = self.validation_loop(t_state, iterators["val"]["iter"], epoch, best_validation_losses)
         ############## END OF TRAINING LOOP ##############
         
         self.summary_writer.flush()
@@ -300,7 +300,7 @@ class DefaultTrainer:
             #summary_writer.write_histograms(epoch, {f"Grads_{epoch//20}" : jnp.concatenate([g.flatten() for g in jax.tree.leaves(grads)])})
         return t_state
     
-    def validation_loop(self, t_state: TrainState, val_it: Iterable[Any], epoch: int, best_validation_loss: float):
+    def validation_loop(self, t_state: TrainState, val_it: Iterable[Any], epoch: int, best_validation_losses: float):
         """
         Perform the validation loop for a given epoch.
 
@@ -320,7 +320,7 @@ class DefaultTrainer:
 
         if self.steps_per_validation == 0:
             logging.warning("Validation dataset is empty.")
-            return best_validation_loss
+            return best_validation_losses
 
         progress_bar = tqdm.trange(0, self.steps_per_validation, desc="Validation", unit="batch", position=2, leave=False, 
                                 disable=os.environ.get("DISABLE_TQDM", False))
@@ -365,12 +365,16 @@ class DefaultTrainer:
             self.summary_writer.write_scalars(epoch, {"Accuracy": validation_accuracy})
 
         ####### CHECKPOINT #######
-        if validation_loss < best_validation_loss:
-            best_validation_loss = validation_loss
-            if self.config.enable_checkpointing and epoch >= self.config.checkpointing_warmup:
-                self.checkpointer.save_checkpoint(jax_utils.unreplicate(t_state), dict(self.config), epoch + 1, validation_loss)
-
-
-        return best_validation_loss
-    
-    
+        for i in range(len(best_validation_losses)):
+            if validation_loss < best_validation_losses[i]:
+                
+                tmp, best_validation_losses[i] = best_validation_losses[i], validation_loss
+                if i < len(best_validation_losses) - 1:
+                    for j in range(i + 1, len(best_validation_losses)):
+                        tmp, best_validation_losses[j] = best_validation_losses[j], tmp
+                    
+                if self.config.enable_checkpointing and epoch >= self.config.checkpointing_warmup:
+                    self.checkpointer.save_checkpoint(jax_utils.unreplicate(t_state), dict(self.config), epoch + 1, validation_loss)
+                break
+            
+        return best_validation_losses

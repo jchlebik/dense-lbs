@@ -15,7 +15,7 @@ class CheckpointManager:
                 "epoch": orbax.checkpoint.StandardCheckpointHandler(),
                 "loss": orbax.checkpoint.StandardCheckpointHandler()
             },  
-            options=orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=True)
+            options=orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, create=True, best_fn=lambda metrics: metrics['loss'], best_mode='min')
         )
     
     def get_checkpoint_manager(self) -> orbax.checkpoint.CheckpointManager:
